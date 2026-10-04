@@ -1,2 +1,5 @@
-# jarvis-ai
-JARVIS-style AI assistant with voice input/output and chat interface
+node_modules/
+dist/
+.env
+npm-debug.log*
+.DS_Store

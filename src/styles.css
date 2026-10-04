@@ -1,0 +1,266 @@
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+
+type Message = {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+};
+
+type Provider = 'auto' | 'openai' | 'ollama';
+
+declare global {
+  interface Window {
+    webkitSpeechRecognition?: any;
+  }
+}
+
+const suggestions = [
+  'Erstelle eine kurze To-do-Liste',
+  'Erkläre mir das Projekt kurz',
+  'Gib mir einen Plan für heute',
+  'Was kannst du tun?',
+];
+
+export default function App() {
+  const [messages, setMessages] = useState<Message[]>([
+    {
+      id: 'welcome',
+      role: 'assistant',
+      content:
+        'Willkommen. Ich bin dein JARVIS-Lite Assistent. Sag etwas, oder nutze das Mikrofon.',
+    },
+  ]);
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [listening, setListening] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
+  const [provider, setProvider] = useState<Provider>('auto');
+  const [status, setStatus] = useState('Bereit');
+  const recognitionRef = useRef<any>(null);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, loading]);
+
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      setStatus('Sprache wird im Browser nicht unterstützt');
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = 'de-DE';
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+
+    recognition.onresult = (event: any) => {
+      const transcript = event.results[0][0].transcript;
+      setInput((prev) => (prev ? `${prev} ${transcript}` : transcript));
+    };
+
+    recognition.onstart = () => {
+      setListening(true);
+      setStatus('Sprache wird erkannt');
+    };
+
+    recognition.onend = () => {
+      setListening(false);
+      setStatus('Bereit');
+    };
+
+    recognition.onerror = () => {
+      setListening(false);
+      setStatus('Spracherkennung fehlgeschlagen');
+    };
+
+    recognitionRef.current = recognition;
+  }, []);
+
+  const speak = (text: string) => {
+    if (!('speechSynthesis' in window)) return;
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = 'de-DE';
+    utterance.onstart = () => setSpeaking(true);
+    utterance.onend = () => setSpeaking(false);
+    utterance.onerror = () => setSpeaking(false);
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utterance);
+  };
+
+  const sendMessage = async (value: string) => {
+    const trimmed = value.trim();
+    if (!trimmed || loading) return;
+
+    const userMessage: Message = {
+      id: crypto.randomUUID(),
+      role: 'user',
+      content: trimmed,
+    };
+
+    setMessages((prev) => [...prev, userMessage]);
+    setInput('');
+    setLoading(true);
+    setStatus('Ich denke nach...');
+
+    try {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: trimmed,
+          provider,
+        }),
+      });
+
+      if (!res.ok) {
+        throw new Error('Chat request failed');
+      }
+
+      const data = await res.json();
+      const assistantText = data.answer || 'Ich konnte keine Antwort erzeugen.';
+
+      const assistantMessage: Message = {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: assistantText,
+      };
+
+      setMessages((prev) => [...prev, assistantMessage]);
+      setStatus('Antwort erhalten');
+      speak(assistantText);
+    } catch (error) {
+      const fallback: Message = {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content:
+          'Es gab ein Problem beim Verbinden mit dem KI-Server. Bitte prüfe die Konfiguration in .env.',
+      };
+
+      setMessages((prev) => [...prev, fallback]);
+      setStatus('Fehler');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSubmit = (event: FormEvent) => {
+    event.preventDefault();
+    sendMessage(input);
+  };
+
+  const toggleListening = () => {
+    if (!recognitionRef.current) {
+      setStatus('Spracherkennung nicht verfügbar');
+      return;
+    }
+
+    if (listening) {
+      recognitionRef.current.stop();
+      return;
+    }
+
+    recognitionRef.current.start();
+  };
+
+  const quickStatus = useMemo(
+    () => `${provider === 'auto' ? 'Auto' : provider.toUpperCase()} • ${status}`,
+    [provider, status]
+  );
+
+  return (
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="brand-block">
+          <div className="brand-mark">J</div>
+          <div>
+            <p className="eyebrow">System</p>
+            <h1>JARVIS</h1>
+          </div>
+        </div>
+
+        <div className="status-panel">
+          <span className="status-dot" />
+          <p>{quickStatus}</p>
+        </div>
+
+        <div className="select-block">
+          <label htmlFor="provider">KI-Anbieter</label>
+          <select
+            id="provider"
+            value={provider}
+            onChange={(e) => setProvider(e.target.value as Provider)}
+          >
+            <option value="auto">Auto</option>
+            <option value="openai">OpenAI</option>
+            <option value="ollama">Ollama</option>
+          </select>
+        </div>
+
+        <div className="shortcut-list">
+          {suggestions.map((item) => (
+            <button key={item} type="button" onClick={() => sendMessage(item)}>
+              {item}
+            </button>
+          ))}
+        </div>
+      </aside>
+
+      <main className="chat-panel">
+        <header className="topbar">
+          <div>
+            <p className="eyebrow">Intelligence</p>
+            <h2>Assistant Console</h2>
+          </div>
+
+          <div className="control-group">
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => setMessages([{ id: 'welcome', role: 'assistant', content: 'Konversation zurückgesetzt.' }])}
+            >
+              Reset
+            </button>
+            <button type="button" className="primary" onClick={toggleListening}>
+              {listening ? 'Stop' : 'Mikrofon'}
+            </button>
+          </div>
+        </header>
+
+        <section className="messages">
+          {messages.map((message) => (
+            <div
+              key={message.id}
+              className={`message-row ${message.role}`}
+            >
+              <div className="bubble">
+                {message.content}
+              </div>
+            </div>
+          ))}
+          {loading && (
+            <div className="message-row assistant">
+              <div className="bubble typing">Denkt nach...</div>
+            </div>
+          )}
+          <div ref={messagesEndRef} />
+        </section>
+
+        <form className="composer" onSubmit={handleSubmit}>
+          <input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Sprich oder tippe deine Anfrage..."
+            aria-label="Nachricht eingeben"
+          />
+          <button type="submit" disabled={loading || !input.trim()}>
+            {loading ? 'Senden...' : 'Senden'}
+          </button>
+        </form>
+      </main>
+    </div>
+  );
+}
