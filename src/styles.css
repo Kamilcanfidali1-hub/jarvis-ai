@@ -4,40 +4,84 @@ type Message = {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  timestamp: string;
 };
 
 type Provider = 'auto' | 'openai' | 'ollama';
+type VoiceState = 'ready' | 'listening' | 'thinking' | 'speaking';
 
 declare global {
   interface Window {
     webkitSpeechRecognition?: any;
+    SpeechRecognition?: any;
   }
 }
 
-const suggestions = [
-  'Erstelle eine kurze To-do-Liste',
-  'Erkläre mir das Projekt kurz',
-  'Gib mir einen Plan für heute',
-  'Was kannst du tun?',
+const STORAGE_KEY = 'jarvis-chat-history';
+const PROVIDER_KEY = 'jarvis-provider';
+
+const defaultMessages: Message[] = [
+  {
+    id: 'welcome',
+    role: 'assistant',
+    content: 'System online. Wie kann ich dir heute helfen?',
+    timestamp: new Date().toISOString(),
+  },
 ];
 
+const suggestions = [
+  'Erstelle eine kurze To-do-Liste',
+  'Erkläre mir dieses Projekt kurz',
+  'Gib mir einen Plan für heute',
+  'Was kannst du tun?',
+  'Summarize meine Aufgaben in 3 Punkten',
+];
+
+const formatTime = (value: string) =>
+  new Date(value).toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+
 export default function App() {
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: 'welcome',
-      role: 'assistant',
-      content:
-        'Willkommen. Ich bin dein JARVIS-Lite Assistent. Sag etwas, oder nutze das Mikrofon.',
-    },
-  ]);
+  const [messages, setMessages] = useState<Message[]>(defaultMessages);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [listening, setListening] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [provider, setProvider] = useState<Provider>('auto');
   const [status, setStatus] = useState('Bereit');
+  const [voiceSupported, setVoiceSupported] = useState(false);
   const recognitionRef = useRef<any>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const savedMessages = localStorage.getItem(STORAGE_KEY);
+    const savedProvider = localStorage.getItem(PROVIDER_KEY) as Provider | null;
+
+    if (savedMessages) {
+      try {
+        const parsed = JSON.parse(savedMessages) as Message[];
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setMessages(parsed);
+        }
+      } catch {
+        // ignore invalid storage data
+      }
+    }
+
+    if (savedProvider && ['auto', 'openai', 'ollama'].includes(savedProvider)) {
+      setProvider(savedProvider);
+    }
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(messages));
+  }, [messages]);
+
+  useEffect(() => {
+    localStorage.setItem(PROVIDER_KEY, provider);
+  }, [provider]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -47,9 +91,12 @@ export default function App() {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
     if (!SpeechRecognition) {
-      setStatus('Sprache wird im Browser nicht unterstützt');
+      setStatus('Spracherkennung nicht verfügbar');
+      setVoiceSupported(false);
       return;
     }
+
+    setVoiceSupported(true);
 
     const recognition = new SpeechRecognition();
     recognition.lang = 'de-DE';
@@ -63,7 +110,7 @@ export default function App() {
 
     recognition.onstart = () => {
       setListening(true);
-      setStatus('Sprache wird erkannt');
+      setStatus('Höre zu...');
     };
 
     recognition.onend = () => {
@@ -81,7 +128,6 @@ export default function App() {
 
   const speak = (text: string) => {
     if (!('speechSynthesis' in window)) return;
-
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = 'de-DE';
     utterance.onstart = () => setSpeaking(true);
@@ -91,6 +137,8 @@ export default function App() {
     window.speechSynthesis.speak(utterance);
   };
 
+  const voiceState: VoiceState = listening ? 'listening' : loading ? 'thinking' : speaking ? 'speaking' : 'ready';
+
   const sendMessage = async (value: string) => {
     const trimmed = value.trim();
     if (!trimmed || loading) return;
@@ -99,6 +147,7 @@ export default function App() {
       id: crypto.randomUUID(),
       role: 'user',
       content: trimmed,
+      timestamp: new Date().toISOString(),
     };
 
     setMessages((prev) => [...prev, userMessage]);
@@ -121,23 +170,26 @@ export default function App() {
       }
 
       const data = await res.json();
-      const assistantText = data.answer || 'Ich konnte keine Antwort erzeugen.';
+      const answer = data.answer || 'Ich konnte keine Antwort erzeugen.';
 
       const assistantMessage: Message = {
         id: crypto.randomUUID(),
         role: 'assistant',
-        content: assistantText,
+        content: answer,
+        timestamp: new Date().toISOString(),
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
       setStatus('Antwort erhalten');
-      speak(assistantText);
+      speak(answer);
     } catch (error) {
+      console.error(error);
       const fallback: Message = {
         id: crypto.randomUUID(),
         role: 'assistant',
         content:
-          'Es gab ein Problem beim Verbinden mit dem KI-Server. Bitte prüfe die Konfiguration in .env.',
+          'Es gab ein Problem mit dem KI-Server. Prüfe bitte .env und starte die API neu.',
+        timestamp: new Date().toISOString(),
       };
 
       setMessages((prev) => [...prev, fallback]);
@@ -166,10 +218,16 @@ export default function App() {
     recognitionRef.current.start();
   };
 
-  const quickStatus = useMemo(
-    () => `${provider === 'auto' ? 'Auto' : provider.toUpperCase()} • ${status}`,
-    [provider, status]
-  );
+  const resetChat = () => {
+    setMessages(defaultMessages);
+    setInput('');
+    setStatus('Konversation zurückgesetzt');
+  };
+
+  const providerLabel = useMemo(() => {
+    if (provider === 'auto') return 'Auto';
+    return provider.toUpperCase();
+  }, [provider]);
 
   return (
     <div className="app-shell">
@@ -177,22 +235,30 @@ export default function App() {
         <div className="brand-block">
           <div className="brand-mark">J</div>
           <div>
-            <p className="eyebrow">System</p>
+            <p className="eyebrow">SYSTEM</p>
             <h1>JARVIS</h1>
           </div>
         </div>
 
-        <div className="status-panel">
+        <div className={`status-panel ${voiceState}`}>
           <span className="status-dot" />
-          <p>{quickStatus}</p>
+          <div>
+            <p className="status-label">Status</p>
+            <p className="status-value">{status}</p>
+          </div>
+        </div>
+
+        <div className="meta-box">
+          <span>KI-Anbieter</span>
+          <strong>{providerLabel}</strong>
         </div>
 
         <div className="select-block">
-          <label htmlFor="provider">KI-Anbieter</label>
+          <label htmlFor="provider">Modus</label>
           <select
             id="provider"
             value={provider}
-            onChange={(e) => setProvider(e.target.value as Provider)}
+            onChange={(event) => setProvider(event.target.value as Provider)}
           >
             <option value="auto">Auto</option>
             <option value="openai">OpenAI</option>
@@ -212,19 +278,20 @@ export default function App() {
       <main className="chat-panel">
         <header className="topbar">
           <div>
-            <p className="eyebrow">Intelligence</p>
+            <p className="eyebrow">INTELLIGENCE</p>
             <h2>Assistant Console</h2>
           </div>
 
           <div className="control-group">
-            <button
-              type="button"
-              className="secondary"
-              onClick={() => setMessages([{ id: 'welcome', role: 'assistant', content: 'Konversation zurückgesetzt.' }])}
-            >
+            <button type="button" className="secondary" onClick={resetChat}>
               Reset
             </button>
-            <button type="button" className="primary" onClick={toggleListening}>
+            <button
+              type="button"
+              className="primary"
+              onClick={toggleListening}
+              disabled={!voiceSupported}
+            >
               {listening ? 'Stop' : 'Mikrofon'}
             </button>
           </div>
@@ -232,18 +299,21 @@ export default function App() {
 
         <section className="messages">
           {messages.map((message) => (
-            <div
-              key={message.id}
-              className={`message-row ${message.role}`}
-            >
-              <div className="bubble">
-                {message.content}
+            <div key={message.id} className={`message-row ${message.role}`}>
+              <div className="bubble-wrap">
+                <div className="bubble">
+                  {message.content}
+                </div>
+                <span className="timestamp">{formatTime(message.timestamp)}</span>
               </div>
             </div>
           ))}
+
           {loading && (
             <div className="message-row assistant">
-              <div className="bubble typing">Denkt nach...</div>
+              <div className="bubble-wrap">
+                <div className="bubble typing">Denkt nach...</div>
+              </div>
             </div>
           )}
           <div ref={messagesEndRef} />
@@ -252,8 +322,8 @@ export default function App() {
         <form className="composer" onSubmit={handleSubmit}>
           <input
             value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="Sprich oder tippe deine Anfrage..."
+            onChange={(event) => setInput(event.target.value)}
+            placeholder={voiceSupported ? 'Sprich oder tippe deine Anfrage...' : 'Tippe deine Anfrage...'}
             aria-label="Nachricht eingeben"
           />
           <button type="submit" disabled={loading || !input.trim()}>
